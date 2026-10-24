@@ -51,7 +51,8 @@ class DigestGenerator:
         self.model = model
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
-        self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+        self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        self.headers = {"x-goog-api-key": self.api_key} if self.api_key else {}
 
     def generate_digest(
         self,
@@ -76,14 +77,14 @@ class DigestGenerator:
 
         # Prepare items payload for the prompt
         items_payload = []
-        for i in sorted_items[:35]:  # Send top candidates for synthesis
+        for i in sorted_items[:30]:  # Send top candidates for synthesis
             dec = i.decision or {}
             items_payload.append({
                 "id": i.id,
                 "source": i.source,
                 "title": i.title,
                 "url": i.url,
-                "summary": i.body[:400] if i.body else "",
+                "summary": i.body[:350] if i.body else "",
                 "route": dec.get("route", "unsure"),
                 "relevance": dec.get("relevance", 3),
             })
@@ -102,10 +103,33 @@ class DigestGenerator:
             },
         }
 
-        with httpx.Client(timeout=45.0) as client:
-            resp = client.post(self.endpoint, json=payload)
-            resp.raise_for_status()
-            result = resp.json()
+        # Try primary model, fallback models on transient 503/429
+        fallback_models = [self.model, "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+        last_error = None
+        result = None
+
+        with httpx.Client(timeout=60.0, headers=self.headers) as client:
+            for model_name in fallback_models:
+                endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                for attempt in range(3):
+                    try:
+                        resp = client.post(endpoint, json=payload)
+                        if resp.status_code in (429, 503):
+                            import time
+                            time.sleep(3.0 * (attempt + 1))
+                            continue
+                        resp.raise_for_status()
+                        result = resp.json()
+                        break
+                    except Exception as e:
+                        last_error = e
+                        import time
+                        time.sleep(2.0)
+                if result:
+                    break
+
+        if not result:
+            raise RuntimeError(f"Digest generation failed after retries and fallback: {last_error}")
 
         digest_markdown = result["candidates"][0]["content"]["parts"][0]["text"]
 

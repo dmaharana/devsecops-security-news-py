@@ -49,12 +49,13 @@ class DecisionEngine:
         self,
         api_key: Optional[str] = None,
         model: str = "gemini-3.5-flash-lite",
-        max_workers: int = 8,
+        max_workers: int = 4,
     ):
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
         self.model = model
         self.max_workers = max_workers
-        self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent?key={self.api_key}"
+        self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        self.headers = {"x-goog-api-key": self.api_key} if self.api_key else {}
 
     def decide_item(self, item: Item) -> dict[str, Any]:
         """
@@ -88,7 +89,7 @@ class DecisionEngine:
         # Retry logic
         for attempt in range(3):
             try:
-                with httpx.Client(timeout=15.0) as client:
+                with httpx.Client(timeout=15.0, headers=self.headers) as client:
                     resp = client.post(self.endpoint, json=payload)
                     if resp.status_code == 429:
                         time.sleep(2.0 * (attempt + 1))
