@@ -9,30 +9,47 @@ logger = logging.getLogger(__name__)
 
 class HackerNewsCollector:
     SOURCE_NAME = "Hacker News Security"
-    API_URL = "https://hn.algolia.com/api/v1/search"
+    API_URL = "https://hn.algolia.com/api/v1/search_by_date"
+    SEARCH_QUERIES = [
+        "vulnerability",
+        "exploit",
+        "security patch",
+        "CVE",
+        "zero-day",
+    ]
 
-    def fetch(self, limit: int = 30) -> list[Item]:
+    def fetch(self, limit: int = 40) -> list[Item]:
         items: list[Item] = []
-        params = {
-            "query": "vulnerability OR CVE OR exploit OR zero-day OR breach",
-            "tags": "story",
-            "hitsPerPage": limit,
-        }
+        seen_ids: set[str] = set()
 
-        try:
-            with httpx.Client(timeout=15.0) as client:
-                resp = client.get(self.API_URL, params=params)
-                resp.raise_for_status()
-                data = resp.json()
-        except Exception as e:
-            logger.warning(f"Error fetching Hacker News security stories: {e}")
-            return items
+        with httpx.Client(timeout=15.0) as client:
+            for query in self.SEARCH_QUERIES:
+                if len(items) >= limit:
+                    break
+                params = {
+                    "query": query,
+                    "tags": "story",
+                    "hitsPerPage": 15,
+                }
+                try:
+                    resp = client.get(self.API_URL, params=params)
+                    resp.raise_for_status()
+                    data = resp.json()
+                except Exception as e:
+                    logger.warning(f"Error fetching Hacker News for query '{query}': {e}")
+                    continue
 
-        hits = data.get("hits", [])
-        for hit in hits:
-            item = self._parse_hit(hit)
-            if item:
-                items.append(item)
+                for hit in data.get("hits", []):
+                    oid = hit.get("objectID")
+                    if not oid or oid in seen_ids:
+                        continue
+                    seen_ids.add(oid)
+
+                    item = self._parse_hit(hit)
+                    if item:
+                        items.append(item)
+                        if len(items) >= limit:
+                            break
 
         return items
 

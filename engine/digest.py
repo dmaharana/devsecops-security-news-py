@@ -66,12 +66,13 @@ class DigestGenerator:
         if not date_str:
             date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
-        # Rank items: 'keep' first, sorted by relevance desc, then 'unsure'
+        # Rank items: un-digested first, then 'keep', sorted by relevance desc
         def sort_key(item: Item):
             dec = item.decision or {}
+            new_to_digest = 2 if item.in_digest is None else 1
             route_priority = 2 if dec.get("route") == "keep" else 1
             rel = dec.get("relevance", 3)
-            return (route_priority, rel)
+            return (new_to_digest, route_priority, rel)
 
         sorted_items = sorted(items, key=sort_key, reverse=True)
 
@@ -87,6 +88,7 @@ class DigestGenerator:
                 "summary": i.body[:350] if i.body else "",
                 "route": dec.get("route", "unsure"),
                 "relevance": dec.get("relevance", 3),
+                "is_new_since_last_digest": i.in_digest is None,
             })
 
         user_prompt = f"Today is {date_str}.\nItems to evaluate for digest:\n{json.dumps(items_payload, indent=2)}"
@@ -137,7 +139,83 @@ class DigestGenerator:
         out_path = self.output_dir / f"{date_str}.md"
         out_path.write_text(digest_markdown, encoding="utf-8")
 
-        # Identify items mentioned
-        included_ids = [i.id for i in sorted_items[:10]]
+        # Identify items actually referenced in the digest output
+        included_ids = [
+            i.id for i in sorted_items
+            if i.url in digest_markdown or (i.title and i.title[:30] in digest_markdown)
+        ]
+        if not included_ids:
+            included_ids = [i.id for i in sorted_items[:10]]
 
         return digest_markdown, out_path, included_ids
+
+    def generate_weekly_rollup(
+        self,
+        items: list[Item],
+        week_str: Optional[str] = None,
+    ) -> tuple[str, Path]:
+        """
+        Generates a weekly roll-up synthesizing the week's top security items.
+        Returns (rollup_markdown, output_file_path).
+        """
+        if not week_str:
+            now = datetime.now(timezone.utc)
+            week_str = f"{now.year}-W{now.isocalendar()[1]:02d}"
+
+        # Keep items that were marked as keep or included in digests
+        kept_items = [
+            i for i in items
+            if (i.decision or {}).get("route") == "keep" or i.in_digest is not None
+        ]
+
+        items_payload = [
+            {
+                "id": i.id,
+                "title": i.title,
+                "url": i.url,
+                "summary": i.body[:300] if i.body else "",
+                "in_digest": i.in_digest,
+            }
+            for i in kept_items[:40]
+        ]
+
+        rollup_prompt = (
+            f"You write a weekly DevSecOps security intelligence roll-up for Week {week_str}.\n"
+            f"Below are the week's top verified security items across LiteLLM, PHP, K8s/Docker, Jenkins, and CI/CD.\n"
+            f"Synthesize this into:\n"
+            f"# DevSecOps Weekly Intelligence Roll-up - Week {week_str}\n\n"
+            f"## The 3 Things That Mattered Most This Week\n"
+            f"<Deep dive into the 3 most consequential security events this week, why they matter, and what to verify>\n\n"
+            f"## Mandatory Action Checklist\n"
+            f"<Actionable list of required version upgrades / patch versions with links>\n\n"
+            f"## Other Notable Advisories\n"
+            f"<One-liners with links>\n\n"
+            f"Items:\n{json.dumps(items_payload, indent=2)}"
+        )
+
+        payload = {
+            "contents": [{"role": "user", "parts": [{"text": rollup_prompt}]}],
+            "generationConfig": {"temperature": 0.2},
+        }
+
+        fallback_models = [self.model, "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+        result = None
+        with httpx.Client(timeout=60.0, headers=self.headers) as client:
+            for model_name in fallback_models:
+                endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                try:
+                    resp = client.post(endpoint, json=payload)
+                    resp.raise_for_status()
+                    result = resp.json()
+                    break
+                except Exception as e:
+                    logger.warning(f"Weekly rollup generation attempt failed with {model_name}: {e}")
+
+        if not result:
+            raise RuntimeError("Weekly roll-up generation failed.")
+
+        rollup_markdown = result["candidates"][0]["content"]["parts"][0]["text"]
+        out_path = self.output_dir / f"weekly-{week_str}.md"
+        out_path.write_text(rollup_markdown, encoding="utf-8")
+
+        return rollup_markdown, out_path
