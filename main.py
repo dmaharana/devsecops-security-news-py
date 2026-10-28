@@ -75,7 +75,10 @@ def run_pipeline(db_path: str = "data/signal_engine.db", date_str: str | None = 
     logger.info(f"Code Filters complete: {dropped_count} dropped, {len(surviving)} surviving")
 
     # 3. Decision Pass (only evaluate new/undecided items to avoid redundant LLM calls)
-    undecided = [item for item in surviving if item.decision is None]
+    undecided = [
+        item for item in surviving
+        if item.decision is None or "Decision call failed" in (item.decision or {}).get("reason", "")
+    ]
     if undecided:
         logger.info(f"Running Decision Pass on {len(undecided)} new candidate items (skipping {len(surviving) - len(undecided)} already decided)...")
         decision_engine = DecisionEngine(max_workers=4)

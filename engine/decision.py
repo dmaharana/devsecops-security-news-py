@@ -57,7 +57,7 @@ class DecisionEngine:
         self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
         self.headers = {"x-goog-api-key": self.api_key} if self.api_key else {}
 
-    def decide_item(self, item: Item) -> dict[str, Any]:
+    def decide_item(self, item: Item, client: Optional[httpx.Client] = None) -> dict[str, Any]:
         """
         Runs the decision pass on a single item.
         Returns a dict: {"relevance": int, "concrete_new": bool, "route": "keep"|"drop"|"unsure", "reason": str}
@@ -86,13 +86,20 @@ class DecisionEngine:
             },
         }
 
-        # Retry logic
-        for attempt in range(3):
-            try:
-                with httpx.Client(timeout=15.0, headers=self.headers) as client:
-                    resp = client.post(self.endpoint, json=payload)
-                    if resp.status_code == 429:
-                        time.sleep(2.0 * (attempt + 1))
+        # 40s read timeout to accommodate concurrent model latency
+        timeout = httpx.Timeout(connect=10.0, read=40.0, write=10.0, pool=10.0)
+        own_client = False
+        if client is None:
+            client = httpx.Client(timeout=timeout, headers=self.headers)
+            own_client = True
+
+        try:
+            # Retry logic with backoff
+            for attempt in range(3):
+                try:
+                    resp = client.post(self.endpoint, json=payload, timeout=timeout)
+                    if resp.status_code in (429, 503):
+                        time.sleep(3.0 * (attempt + 1))
                         continue
                     resp.raise_for_status()
                     result_json = resp.json()
@@ -118,9 +125,12 @@ class DecisionEngine:
                         "route": route,
                         "reason": reason,
                     }
-            except Exception as e:
-                logger.warning(f"Decision attempt {attempt+1} failed for {item.id}: {e}")
-                time.sleep(1.0)
+                except Exception as e:
+                    logger.warning(f"Decision attempt {attempt+1} failed for {item.id}: {e}")
+                    time.sleep(2.0 * (attempt + 1))
+        finally:
+            if own_client:
+                client.close()
 
         # Fail-open
         return {
@@ -132,22 +142,26 @@ class DecisionEngine:
 
     def evaluate_batch(self, items: list[Item]) -> dict[str, dict[str, Any]]:
         """
-        Runs decision pass concurrently over items.
+        Runs decision pass concurrently over items using a shared connection pool.
         Returns dict mapping item.id to decision dict.
         """
         results: dict[str, dict[str, Any]] = {}
-        with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
-            future_to_item = {executor.submit(self.decide_item, item): item for item in items}
-            for future in as_completed(future_to_item):
-                item = future_to_item[future]
-                try:
-                    dec = future.result()
-                    results[item.id] = dec
-                except Exception as e:
-                    results[item.id] = {
-                        "relevance": 3,
-                        "concrete_new": True,
-                        "route": "unsure",
-                        "reason": f"Exception: {e}",
-                    }
+        timeout = httpx.Timeout(connect=10.0, read=40.0, write=10.0, pool=10.0)
+        limits = httpx.Limits(max_keepalive_connections=self.max_workers, max_connections=self.max_workers * 2)
+
+        with httpx.Client(timeout=timeout, headers=self.headers, limits=limits) as client:
+            with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
+                future_to_item = {executor.submit(self.decide_item, item, client): item for item in items}
+                for future in as_completed(future_to_item):
+                    item = future_to_item[future]
+                    try:
+                        dec = future.result()
+                        results[item.id] = dec
+                    except Exception as e:
+                        results[item.id] = {
+                            "relevance": 3,
+                            "concrete_new": True,
+                            "route": "unsure",
+                            "reason": f"Exception: {e}",
+                        }
         return results
