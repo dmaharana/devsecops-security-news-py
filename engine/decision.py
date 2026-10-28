@@ -1,3 +1,4 @@
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import json
 import logging
@@ -47,30 +48,29 @@ Respond with ONLY this JSON format:
 class DecisionEngine:
     def __init__(
         self,
+        provider: Optional[str] = None,
+        ollama_host: Optional[str] = None,
+        model: Optional[str] = None,
         api_key: Optional[str] = None,
-        model: str = "gemini-3.5-flash-lite",
         max_workers: int = 4,
     ):
+        self.provider = provider or os.getenv("LLM_PROVIDER", "ollama")
+        self.ollama_host = (ollama_host or os.getenv("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
+        if self.provider == "ollama":
+            self.model = model or os.getenv("OLLAMA_MODEL", "gemma4:31b-cloud")
+        else:
+            self.model = model or "gemini-3.5-flash-lite"
+
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        self.model = model
         self.max_workers = max_workers
-        self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
+        self.gemini_endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
         self.headers = {"x-goog-api-key": self.api_key} if self.api_key else {}
 
     def decide_item(self, item: Item, client: Optional[httpx.Client] = None) -> dict[str, Any]:
         """
-        Runs the decision pass on a single item.
+        Runs the decision pass on a single item using Ollama or Gemini.
         Returns a dict: {"relevance": int, "concrete_new": bool, "route": "keep"|"drop"|"unsure", "reason": str}
         """
-        if not self.api_key:
-            # If no API key configured, fail-open to unsure
-            return {
-                "relevance": 3,
-                "concrete_new": True,
-                "route": "unsure",
-                "reason": "No API key configured; fail-open to reading pass",
-            }
-
         prompt = DECISION_PROMPT.format(
             title=item.title,
             source=item.source,
@@ -78,35 +78,56 @@ class DecisionEngine:
             body_snippet=item.body[:1500] if item.body else "",
         )
 
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "response_mime_type": "application/json",
-                "temperature": 0.0,
-            },
-        }
-
-        # 40s read timeout to accommodate concurrent model latency
         timeout = httpx.Timeout(connect=10.0, read=40.0, write=10.0, pool=10.0)
         own_client = False
         if client is None:
-            client = httpx.Client(timeout=timeout, headers=self.headers)
+            headers = {} if self.provider == "ollama" else self.headers
+            client = httpx.Client(timeout=timeout, headers=headers)
             own_client = True
 
         try:
-            # Retry logic with backoff
             for attempt in range(3):
                 try:
-                    resp = client.post(self.endpoint, json=payload, timeout=timeout)
-                    if resp.status_code in (429, 503):
-                        time.sleep(3.0 * (attempt + 1))
-                        continue
-                    resp.raise_for_status()
-                    result_json = resp.json()
+                    if self.provider == "ollama":
+                        url = f"{self.ollama_host}/api/chat"
+                        payload = {
+                            "model": self.model,
+                            "messages": [{"role": "user", "content": prompt}],
+                            "format": "json",
+                            "stream": False,
+                            "options": {"temperature": 0.0},
+                        }
+                        resp = client.post(url, json=payload, timeout=timeout)
+                        resp.raise_for_status()
+                        raw_text = resp.json().get("message", {}).get("content", "")
+                    else:
+                        if not self.api_key:
+                            return {
+                                "relevance": 3,
+                                "concrete_new": True,
+                                "route": "unsure",
+                                "reason": "No GEMINI_API_KEY set; fail-open to reading pass",
+                            }
+                        payload = {
+                            "contents": [{"parts": [{"text": prompt}]}],
+                            "generationConfig": {
+                                "response_mime_type": "application/json",
+                                "temperature": 0.0,
+                            },
+                        }
+                        resp = client.post(self.gemini_endpoint, json=payload, timeout=timeout)
+                        if resp.status_code in (429, 503):
+                            time.sleep(3.0 * (attempt + 1))
+                            continue
+                        resp.raise_for_status()
+                        raw_text = resp.json()["candidates"][0]["content"]["parts"][0]["text"]
 
-                    text = result_json["candidates"][0]["content"]["parts"][0]["text"]
-                    data = json.loads(text)
+                    # Extract JSON from output
+                    match = re.search(r"\{.*\}", raw_text, re.DOTALL)
+                    if not match:
+                        raise ValueError(f"No JSON found in response: {raw_text[:100]}")
 
+                    data = json.loads(match.group(0))
                     relevance = int(data.get("relevance", 3))
                     concrete_new = bool(data.get("concrete_new", True))
                     reason = data.get("reason", "")
@@ -126,8 +147,8 @@ class DecisionEngine:
                         "reason": reason,
                     }
                 except Exception as e:
-                    logger.warning(f"Decision attempt {attempt+1} failed for {item.id}: {e}")
-                    time.sleep(2.0 * (attempt + 1))
+                    logger.warning(f"Decision attempt {attempt+1} failed for {item.id} via {self.provider}: {e}")
+                    time.sleep(1.0 * (attempt + 1))
         finally:
             if own_client:
                 client.close()
@@ -137,7 +158,7 @@ class DecisionEngine:
             "relevance": 3,
             "concrete_new": True,
             "route": "unsure",
-            "reason": "Decision call failed; fail-open to reading pass",
+            "reason": f"Decision call failed on {self.provider}; fail-open to reading pass",
         }
 
     def evaluate_batch(self, items: list[Item]) -> dict[str, dict[str, Any]]:
@@ -148,8 +169,9 @@ class DecisionEngine:
         results: dict[str, dict[str, Any]] = {}
         timeout = httpx.Timeout(connect=10.0, read=40.0, write=10.0, pool=10.0)
         limits = httpx.Limits(max_keepalive_connections=self.max_workers, max_connections=self.max_workers * 2)
+        headers = {} if self.provider == "ollama" else self.headers
 
-        with httpx.Client(timeout=timeout, headers=self.headers, limits=limits) as client:
+        with httpx.Client(timeout=timeout, headers=headers, limits=limits) as client:
             with ThreadPoolExecutor(max_workers=self.max_workers) as executor:
                 future_to_item = {executor.submit(self.decide_item, item, client): item for item in items}
                 for future in as_completed(future_to_item):

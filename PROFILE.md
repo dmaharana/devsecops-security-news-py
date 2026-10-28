@@ -28,6 +28,12 @@ Data platform: Per-source direct (APIs, feeds, and open endpoints)
 - Language: English only
 - Deduplication: Stable ID (SHA256 of canonical URL or source-native ID)
 
+## Models and LLM Provider
+
+- Provider: Local Ollama (`http://localhost:11434`)
+- Model: `gemma4:31b-cloud` (for both decision pass classification and daily digest synthesis)
+- Cost & Subscription: Completely free, runs locally with zero external API fees
+
 ## The decision question(s)
 
 1. Relevance (score 1-5): Does this item report a security vulnerability, CVE, active exploit, supply chain risk, patch, or hardening alert affecting our DevSecOps stack (LiteLLM, PHP, Docker/K8s, Jenkins, SonarQube, Artifactory, Atlassian, CI/CD)?

@@ -43,12 +43,20 @@ Format template:
 class DigestGenerator:
     def __init__(
         self,
+        provider: Optional[str] = None,
+        ollama_host: Optional[str] = None,
+        model: Optional[str] = None,
         api_key: Optional[str] = None,
-        model: str = "gemini-3.5-flash",
         output_dir: str = "digests",
     ):
+        self.provider = provider or os.getenv("LLM_PROVIDER", "ollama")
+        self.ollama_host = (ollama_host or os.getenv("OLLAMA_HOST", "http://localhost:11434")).rstrip("/")
+        if self.provider == "ollama":
+            self.model = model or os.getenv("OLLAMA_MODEL", "gemma4:31b-cloud")
+        else:
+            self.model = model or "gemini-3.5-flash"
+
         self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        self.model = model
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self.endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{self.model}:generateContent"
@@ -93,47 +101,63 @@ class DigestGenerator:
 
         user_prompt = f"Today is {date_str}.\nItems to evaluate for digest:\n{json.dumps(items_payload, indent=2)}"
 
-        payload = {
-            "contents": [
-                {
-                    "role": "user",
-                    "parts": [{"text": f"{DIGEST_SYSTEM_PROMPT.format(date=date_str)}\n\n{user_prompt}"}],
-                }
-            ],
-            "generationConfig": {
-                "temperature": 0.2,
-            },
-        }
+        if self.provider == "ollama":
+            url = f"{self.ollama_host}/api/chat"
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": DIGEST_SYSTEM_PROMPT.format(date=date_str)},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "stream": False,
+                "options": {"temperature": 0.2},
+            }
+            with httpx.Client(timeout=90.0) as client:
+                resp = client.post(url, json=payload)
+                resp.raise_for_status()
+                digest_markdown = resp.json()["message"]["content"]
+        else:
+            payload = {
+                "contents": [
+                    {
+                        "role": "user",
+                        "parts": [{"text": f"{DIGEST_SYSTEM_PROMPT.format(date=date_str)}\n\n{user_prompt}"}],
+                    }
+                ],
+                "generationConfig": {
+                    "temperature": 0.2,
+                },
+            }
 
-        # Try primary model, fallback models on transient 503/429
-        fallback_models = [self.model, "gemini-3.8-flash", "gemini-3.5-flash-lite"]
-        last_error = None
-        result = None
+            # Try primary model, fallback models on transient 503/429
+            fallback_models = [self.model, "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+            last_error = None
+            result = None
 
-        with httpx.Client(timeout=60.0, headers=self.headers) as client:
-            for model_name in fallback_models:
-                endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-                for attempt in range(3):
-                    try:
-                        resp = client.post(endpoint, json=payload)
-                        if resp.status_code in (429, 503):
+            with httpx.Client(timeout=60.0, headers=self.headers) as client:
+                for model_name in fallback_models:
+                    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                    for attempt in range(3):
+                        try:
+                            resp = client.post(endpoint, json=payload)
+                            if resp.status_code in (429, 503):
+                                import time
+                                time.sleep(3.0 * (attempt + 1))
+                                continue
+                            resp.raise_for_status()
+                            result = resp.json()
+                            break
+                        except Exception as e:
+                            last_error = e
                             import time
-                            time.sleep(3.0 * (attempt + 1))
-                            continue
-                        resp.raise_for_status()
-                        result = resp.json()
+                            time.sleep(2.0)
+                    if result:
                         break
-                    except Exception as e:
-                        last_error = e
-                        import time
-                        time.sleep(2.0)
-                if result:
-                    break
 
-        if not result:
-            raise RuntimeError(f"Digest generation failed after retries and fallback: {last_error}")
+            if not result:
+                raise RuntimeError(f"Digest generation failed after retries and fallback: {last_error}")
 
-        digest_markdown = result["candidates"][0]["content"]["parts"][0]["text"]
+            digest_markdown = result["candidates"][0]["content"]["parts"][0]["text"]
 
         # Save to digests/YYYY-MM-DD.md
         out_path = self.output_dir / f"{date_str}.md"
@@ -193,28 +217,41 @@ class DigestGenerator:
             f"Items:\n{json.dumps(items_payload, indent=2)}"
         )
 
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": rollup_prompt}]}],
-            "generationConfig": {"temperature": 0.2},
-        }
+        if self.provider == "ollama":
+            url = f"{self.ollama_host}/api/chat"
+            payload = {
+                "model": self.model,
+                "messages": [{"role": "user", "content": rollup_prompt}],
+                "stream": False,
+                "options": {"temperature": 0.2},
+            }
+            with httpx.Client(timeout=90.0) as client:
+                resp = client.post(url, json=payload)
+                resp.raise_for_status()
+                rollup_markdown = resp.json()["message"]["content"]
+        else:
+            payload = {
+                "contents": [{"role": "user", "parts": [{"text": rollup_prompt}]}],
+                "generationConfig": {"temperature": 0.2},
+            }
 
-        fallback_models = [self.model, "gemini-3.8-flash", "gemini-3.5-flash-lite"]
-        result = None
-        with httpx.Client(timeout=60.0, headers=self.headers) as client:
-            for model_name in fallback_models:
-                endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
-                try:
-                    resp = client.post(endpoint, json=payload)
-                    resp.raise_for_status()
-                    result = resp.json()
-                    break
-                except Exception as e:
-                    logger.warning(f"Weekly rollup generation attempt failed with {model_name}: {e}")
+            fallback_models = [self.model, "gemini-3.8-flash", "gemini-3.5-flash-lite"]
+            result = None
+            with httpx.Client(timeout=60.0, headers=self.headers) as client:
+                for model_name in fallback_models:
+                    endpoint = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent"
+                    try:
+                        resp = client.post(endpoint, json=payload)
+                        resp.raise_for_status()
+                        result = resp.json()
+                        break
+                    except Exception as e:
+                        logger.warning(f"Weekly rollup generation attempt failed with {model_name}: {e}")
 
-        if not result:
-            raise RuntimeError("Weekly roll-up generation failed.")
+            if not result:
+                raise RuntimeError("Weekly roll-up generation failed.")
 
-        rollup_markdown = result["candidates"][0]["content"]["parts"][0]["text"]
+            rollup_markdown = result["candidates"][0]["content"]["parts"][0]["text"]
         out_path = self.output_dir / f"weekly-{week_str}.md"
         out_path.write_text(rollup_markdown, encoding="utf-8")
 

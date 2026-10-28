@@ -6,9 +6,15 @@ An automated daily intelligence engine that monitors DevSecOps supply chain vuln
 
 ```
 Sources -> SQLite Store (Stable IDs & Dedupe) -> Code Filters (Age, Engagement, Language)
-        -> Parallel Decision Pass (Gemini Flash Lite) -> Reading Pass & Synthesizer (Gemini Flash)
+        -> Parallel Decision Pass (Ollama gemma4:31b-cloud) -> Reading Pass & Synthesizer (Ollama gemma4:31b-cloud)
         -> Daily Markdown Digest (digests/YYYY-MM-DD.md)
 ```
+
+## LLM Configuration
+
+The engine runs 100% locally with zero cloud subscriptions or API keys:
+- **Provider**: Ollama (`http://localhost:11434`)
+- **Model**: `gemma4:31b-cloud` (configurable in `.env` via `OLLAMA_MODEL` and `OLLAMA_HOST`)
 
 ## Running the Engine
 
