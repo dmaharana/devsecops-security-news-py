@@ -86,9 +86,32 @@ saves on reading, never on the cost of fetching the data.
 
 | Job | Model |
 |---|---|
-| The decision on every item | a decision model with typed answers (TypeSafe's Jev via OpenRouter is the reference), or the smallest LLM that returns structured output reliably |
-| Reading and writing the digest | a mid-tier LLM, once per run |
-| Content ideas, weekly roll-up (optional) | the same or a stronger model, once per run or week |
+| The decision on every item | a local LLM via Ollama (`format: "json"`, e.g. `gemma4:31b-cloud`, `qwen2.5`), a decision model with typed answers (TypeSafe's Jev via OpenRouter is the reference), or a small cloud LLM with structured output |
+| Reading and writing the digest | a local LLM via Ollama (`gemma4:31b-cloud`, `llama3.1`) or a mid-tier cloud LLM, once per run |
+| Content ideas, weekly roll-up (optional) | the same local or cloud model, once per run or week |
+
+## Calling a Local LLM (Ollama)
+
+When running locally with Ollama (`http://localhost:11434`), zero API keys or subscriptions are required.
+
+Send one POST per item to `/api/chat` with structured JSON output:
+
+```json
+POST http://localhost:11434/api/chat
+{
+  "model": "gemma4:31b-cloud",
+  "messages": [{"role": "user", "content": "<prompt asking for relevance and concrete_new in JSON>"}],
+  "format": "json",
+  "stream": false,
+  "options": {"temperature": 0.0}
+}
+```
+
+Key implementation practices for local LLM:
+1. **Defensive JSON extraction:** Extract the JSON body with `re.search(r"\{.*\}", text, re.DOTALL)` to safely ignore markdown code fences (````json ... ````) that local models may output.
+2. **Persistent connection pooling:** Share a single `httpx.Client` instance with connection pooling across worker threads (`limits=httpx.Limits(max_keepalive_connections=4)`).
+3. **Adequate read timeouts:** Set read timeouts to 30-40s. While single calls take 300-500ms, concurrency queues on local GPUs/CPUs can cause short 10-15s timeouts to fail-open unnecessarily.
+4. **Cache decisions in store (score once):** On subsequent daily runs, only evaluate items where `item.decision is None` or where a prior network attempt failed. SQLite retains past decisions, preventing redundant compute.
 
 ## Calling Jev (TypeSafe's decision model on OpenRouter)
 

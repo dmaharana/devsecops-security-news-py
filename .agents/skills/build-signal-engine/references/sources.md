@@ -63,7 +63,7 @@ consequence (a deprecation, a new mode, a price change). Most have no feed.
 
 Where people using the tools report what they found, often before anyone writes about it.
 
-- **Hacker News:** the free Firebase or Algolia API. Filter by points in code.
+- **Hacker News:** the free Firebase or Algolia API. Filter by points in code. When using Algolia, query `/api/v1/search_by_date` with individual targeted keywords (`vulnerability`, `CVE`, `exploit`, etc.) and deduplicate IDs in code; complex boolean query strings (`A OR B OR C`) on `/search` often match literally and return 0 hits.
 - **Reddit:** the official API needs approval under Reddit's developer terms, and
   unauthenticated JSON is unreliable. The practical route is a hosted scraper (an Apify
   Actor, for example). Use listing URLs that encode the window
@@ -90,6 +90,9 @@ Where people using the tools report what they found, often before anyone writes 
 - **arXiv:** the free API, by category, last N days.
 - **GitHub trending:** the trending page or a provider. Check the input limits (some cap
   results per run).
+- **Curated News & RSS feeds:** Use standard XML/Atom parsing. Include browser-like headers
+  (`User-Agent: Mozilla/5.0 ...`, `Accept: text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8`,
+  `Accept-Language: en-US,en;q=0.9`) to prevent Cloudflare 403 Forbidden blocks on sites like BleepingComputer.
 - **News search:** a search API with a per-query cap. High duplication; dedupe by URL and
   by title.
 

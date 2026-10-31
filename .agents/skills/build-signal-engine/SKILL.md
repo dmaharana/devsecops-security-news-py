@@ -1,6 +1,6 @@
 ---
 name: build-signal-engine
-description: Build a personal signal engine from scratch - a system that reads every source someone cares about each day (changelogs and release notes, communities, feeds, videos, papers), makes a quick decision on every item, lets an LLM read only what survives, and delivers one short digest. Interviews the user first to pin down what they need to keep up with, the sources where it actually shows up, and the one question that decides what is worth their time, then builds it one stage at a time into their own repo, proving each stage on real data. Agnostic about the coding agent, the decision model and where the data comes from. Use when the user wants to keep up with AI or their field without doomscrolling, build an AI news digest, a daily briefing, a content engine, a research or competitor monitor, a changelog watcher, or "something that reads everything and tells me what matters"; and when they mention signal vs noise, an information diet, or falling behind.
+description: Build a personal signal engine from scratch - a system that reads every source someone cares about each day (changelogs and release notes, communities, feeds, videos, papers), makes a quick decision on every item using a local LLM (Ollama) or cloud model, lets an LLM read only what survives, and delivers one short digest. Interviews the user first to pin down what they need to keep up with, the sources where it actually shows up, and the one question that decides what is worth their time, then builds it one stage at a time into their own repo, proving each stage on real data. Agnostic about the coding agent, local vs cloud models (supports local Ollama with zero subscriptions), and where the data comes from. Use when the user wants to keep up with AI, DevSecOps, or their field without doomscrolling, build an AI news digest, a daily briefing, a content engine, a research or competitor monitor, a changelog watcher, or "something that reads everything and tells me what matters"; and when they mention signal vs noise, an information diet, or falling behind.
 argument-hint: "[optional: path/to/repo]"
 arguments: [repo]
 ---
@@ -43,7 +43,7 @@ skill works this way unless asked. The reasoning lives in `references/`, for you
 ## The shape
 
 ```
-sources -> store (dedupe, stable ids) -> code filters (dates, numbers) -> decide on every item
+sources -> store (dedupe, stable ids) -> code filters (dates, numbers) -> decide on every item (local Ollama or decision model)
         -> the LLM reads what survives -> digest -> delivered on a schedule
 ```
 
@@ -92,8 +92,7 @@ Read `references/interview.md` and work through it. Three rounds:
    use daily, where people using those tools talk, three items from last week they would
    have wanted and three they never want again, what is too old or too small to matter, and
    whether their sources come through one data platform or get picked per source.
-3. **One message of defaults** to confirm: schedule, stack, storage, caps, models,
-   digest length, delivery.
+3. **One message of defaults** to confirm: schedule, stack, storage, caps, LLM provider & models (Local Ollama recommended for zero subscriptions/free/private, or cloud API if keys exist), digest length, delivery. Check for local Ollama first (`curl -s http://localhost:11434/api/tags`).
 
 **Every question goes through the question tool** (`AskUserQuestion` in Claude Code, or
 the equivalent), with two to four options drafted from what they have already said, one
@@ -147,9 +146,21 @@ filter does not refund a row the provider already billed.
 ## Stage 4. The decision pass
 
 Read `references/decisions.md`. Every item that survived the code filters gets the
-question(s) from `PROFILE.md` in one call, all items in parallel. Use a decision model with
-typed, probability-scored answers if one is available to the user (TypeSafe's Jev via
-OpenRouter is the reference here), otherwise a small, fast LLM with structured output.
+question(s) from `PROFILE.md` in one call, all items in parallel.
+
+Use a local LLM via Ollama (`http://localhost:11434/api/chat` with `format: "json"`) when
+running locally or when the user has no cloud subscriptions. It is free, private, and runs in
+hundreds of milliseconds. Otherwise use a decision model with typed, probability-scored answers
+(TypeSafe's Jev via OpenRouter is the reference here) or a small, fast cloud LLM with structured output.
+
+**Score only new items on subsequent runs.** Check `item.decision is None` (or prior failed
+attempts) before calling the model. SQLite persists past decisions, so a second run re-evaluates
+only newly arrived items rather than re-scoring the entire store.
+
+**Use adequate read timeouts and pooled connections.** Set a 30-40s read timeout and reuse a
+shared HTTP client across threads to prevent false timeouts during concurrent batches. If a call
+fails or times out after retries, fail open to `unsure` so the reading pass can evaluate it, but
+log the failure so the next run can re-try.
 
 Code routes each item:
 
@@ -169,11 +180,16 @@ first.
 
 ## Stage 5. The reading pass and the digest
 
-Read `references/digest.md`. The LLM reads only what the decision pass let through, groups
-related items, and writes the digest in the format from `PROFILE.md` with every link kept.
-Start from `templates/digest_prompt.md`.
+Read `references/digest.md`. The LLM (local via Ollama `/api/chat` or a cloud model) reads
+only what the decision pass let through, groups related items, and writes the digest in the
+format from `PROFILE.md` with every link kept. Start from `templates/digest_prompt.md`.
 
-Cap the digest (default ten items). A digest nobody finishes is a feed.
+Prioritize un-digested items (`in_digest is None`) first so daily runs emphasize newly surfaced
+findings rather than repeating yesterday's items. Record referenced item IDs into SQLite so they
+are marked as digested.
+
+Cap the digest (default ten items). A digest nobody finishes is a feed. Add a `--rollup` option
+to generate a weekly intelligence summary on demand.
 
 ## Stage 6. Delivery and schedule
 
@@ -195,12 +211,20 @@ or a sharper question. Then it runs on its own.
 
 ## Operating facts
 
-- Keys live in the repo's gitignored env file and the engine loads them from there. Never
-  read or output that file with any tool or command (cat, sed, grep, Get-Content, Read,
-  `open()`), not even "masked": a masking regex that is slightly wrong prints every key. To
-  check a key, load the file with python-dotenv inside a program and print only the key's
-  name and whether it is set. If one is missing, ask the user to add it themselves rather
+- Prefer local LLMs when no API subscriptions exist. Check whether Ollama is active on
+  `http://localhost:11434/api/tags` before asking for cloud API keys. Local Ollama runs with
+  zero cost, zero cloud subscriptions, zero rate limits, and full data privacy.
+- Keys (if cloud APIs are used) live in the repo's gitignored env file and the engine loads
+  them from there. Never read or output that file with any tool or command (cat, sed, grep,
+  Get-Content, Read, `open()`), not even "masked": a masking regex that is slightly wrong prints
+  every key. To check a key, load the file with python-dotenv inside a program and print only the
+  key's name and whether it is set. If one is missing, ask the user to add it themselves rather
   than pasting it into the chat.
+- Persist decisions in the SQLite store and score only undecided items on daily runs. Re-evaluating
+  all surviving items every day wastes compute and time.
+- Use resilient feed scraping: Pass standard browser headers (`User-Agent`, `Accept`,
+  `Accept-Language`) to avoid Cloudflare 403 blocks on feeds like BleepingComputer. Use
+  `/search_by_date` with individual terms for Hacker News to avoid boolean query drops.
 - Test every run against a throwaway database, never the one that will go live.
 - On Windows, force UTF-8 output from the start (`PYTHONIOENCODING=utf-8` or reconfigure
   stdout). Titles from communities carry emoji and non-English text that crash the console.

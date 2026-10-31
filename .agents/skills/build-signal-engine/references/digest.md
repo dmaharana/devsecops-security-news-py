@@ -6,12 +6,17 @@ One LLM call per run over everything the decision pass kept or was unsure about,
 the decision scores (keeps first, then unsure by relevance). Start from
 `templates/digest_prompt.md` and fill in the user's focus and format from `PROFILE.md`.
 
+- When using local Ollama, call `POST http://localhost:11434/api/chat` with `{"model": "gemma4:31b-cloud", "messages": [...], "stream": false, "options": {"temperature": 0.2}}`.
+- **Prioritize un-digested items:** Sort items with `in_digest is None` ahead of already-digested
+  items so daily runs highlight fresh developments rather than repeating yesterday's news.
 - Give the LLM title, source, url, the first ~300 characters of the body and the category,
   not full pages. If an item needs more, fetch its full text only for the items that made
   it this far.
 - The LLM makes the final keep call on unsure items, groups related items (three posts
   about one release become one entry), and writes one or two sentences each.
 - **Every link stays.** The digest is a pointer, not a replacement.
+- **Track what was included:** Inspect the generated markdown to identify which items were
+  referenced (by URL or title fragment) and update `in_digest = date` in SQLite.
 - Cap the digest (default ten). If the LLM wants more, it picks the ten.
 - Tell it to say plainly when an item is a rumor or a minor change, and never to call a
   changelog entry a launch unless the entry says something launched.

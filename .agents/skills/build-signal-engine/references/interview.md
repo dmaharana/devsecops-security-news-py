@@ -154,18 +154,21 @@ One message, every remaining setting with its default filled in, ask what to cha
 | Schedule | daily, early morning, local time |
 | Stack | Python + uv, or whatever their repo already uses |
 | Storage | SQLite file in the repo, gitignored |
+| LLM Provider | Local Ollama (`http://localhost:11434`, zero subscription/free/private) if active or requested; otherwise cloud API |
 | Per-source cap | 50-100 items per source per run, plus a spending cap on anything billed |
-| Decision model | Jev via OpenRouter if they have a key, otherwise a small fast LLM with structured output |
-| Reading model | a mid-tier LLM; the reading pass is one call per run |
+| Decision model | Local Ollama with JSON mode (e.g. `gemma4:31b-cloud`, `qwen2.5`), or Jev via OpenRouter / small fast cloud LLM |
+| Reading model | Local Ollama (`/api/chat` with `gemma4:31b-cloud`) or mid-tier cloud LLM |
 | Digest | ten items, grouped, one or two sentences each, every link kept |
 | Delivery | `digests/YYYY-MM-DD.md` in the repo, plus their R1.3 destination |
 | Shadow week | on |
 
 ## Explanations, one breath each
 
+- **Local LLM (Ollama):** runs an open-weight model on your local machine with zero subscriptions,
+  zero API costs, zero data leaving your machine, and structured JSON output.
 - **Decision model:** a model that only answers typed questions (yes/no, pick one, a
-  score) with probabilities, in milliseconds, for a fraction of a cent. It writes no text,
-  so it makes the quick call on every item and the LLM does the reading.
+  score) with probabilities or structured JSON, in milliseconds. It writes no long prose,
+  so it makes the quick call on every item and the reading pass handles synthesis.
 - **Stable id:** the same item always gets the same id, so the engine knows it has seen it
   and a re-run adds nothing new. Without it, every run is a full re-read.
 - **Shadow week:** the engine runs for a week while they read the digest and mark misses

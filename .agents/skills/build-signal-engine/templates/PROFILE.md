@@ -22,6 +22,13 @@ Data platform:
 - Max age:
 - Engagement floor:
 
+## Models and LLM Provider
+
+- Provider: Local Ollama (`http://localhost:11434`) / Cloud API (OpenRouter, Gemini, OpenAI)
+- Decision model: `gemma4:31b-cloud` (or local model / Jev / small cloud LLM)
+- Reading model: `gemma4:31b-cloud` (or mid-tier model)
+- Cost & Subscription: Completely free, local, private (or pay-per-token API)
+
 ## The decision question(s)
 
 <!-- One thing per question. Written from the examples below, in my words. -->
